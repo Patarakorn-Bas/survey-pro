@@ -1,0 +1,30 @@
+{
+ "name": "สำรวจและวางผัง Pro",
+ "short_name": "สำรวจ Pro",
+ "description": "วงรอบ ระดับ Least Squares, COGO วางผัง, TIN คอนทัวร์ และปริมาตรดิน",
+ "lang": "th",
+ "start_url": "./",
+ "scope": "./",
+ "display": "standalone",
+ "orientation": "any",
+ "background_color": "#1E2D33",
+ "theme_color": "#1E2D33",
+ "icons": [
+  {
+   "src": "icon-192.png",
+   "sizes": "192x192",
+   "type": "image/png"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png"
+  },
+  {
+   "src": "icon-maskable-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "maskable"
+  }
+ ]
+}
