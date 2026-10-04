@@ -659,6 +659,57 @@ details.hlp[open] summary{border-bottom:1px solid var(--rule2)}
     return (lo + hi) / 2;
   }
 
+
+  /* ---------- UTM (WGS84) and route curves ---------- */
+  const D2R = Math.PI / 180;
+  const WA = 6378137, WF = 1 / 298.257223563, WE2 = WF * (2 - WF), WEP2 = WE2 / (1 - WE2), K0 = 0.9996;
+  function ll2utm(lat, lon, zone) {
+    zone = zone || Math.floor((lon + 180) / 6) + 1;
+    const lon0 = ((zone - 1) * 6 - 180 + 3) * D2R, ph = lat * D2R, lm = lon * D2R;
+    const Nn = WA / Math.sqrt(1 - WE2 * Math.sin(ph) ** 2), T = Math.tan(ph) ** 2, C = WEP2 * Math.cos(ph) ** 2, A = Math.cos(ph) * (lm - lon0);
+    const e4 = WE2 * WE2, e6 = e4 * WE2;
+    const M = WA * ((1 - WE2 / 4 - 3 * e4 / 64 - 5 * e6 / 256) * ph - (3 * WE2 / 8 + 3 * e4 / 32 + 45 * e6 / 1024) * Math.sin(2 * ph) + (15 * e4 / 256 + 45 * e6 / 1024) * Math.sin(4 * ph) - (35 * e6 / 3072) * Math.sin(6 * ph));
+    const E = K0 * Nn * (A + (1 - T + C) * A ** 3 / 6 + (5 - 18 * T + T * T + 72 * C - 58 * WEP2) * A ** 5 / 120) + 500000;
+    let N = K0 * (M + Nn * Math.tan(ph) * (A * A / 2 + (5 - T + 9 * C + 4 * C * C) * A ** 4 / 24 + (61 - 58 * T + T * T + 600 * C - 330 * WEP2) * A ** 6 / 720));
+    if (lat < 0) N += 10000000;
+    return { E, N, zone, south: lat < 0 };
+  }
+  function utm2ll(E, Nv, zone, south) {
+    const e1 = (1 - Math.sqrt(1 - WE2)) / (1 + Math.sqrt(1 - WE2)), x = E - 500000, y = south ? Nv - 10000000 : Nv;
+    const lon0 = ((zone - 1) * 6 - 180 + 3) * D2R, M = y / K0, e4 = WE2 * WE2, e6 = e4 * WE2;
+    const mu = M / (WA * (1 - WE2 / 4 - 3 * e4 / 64 - 5 * e6 / 256));
+    const ph1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * Math.sin(2 * mu) + (21 * e1 * e1 / 16 - 55 * e1 ** 4 / 32) * Math.sin(4 * mu) + (151 * e1 ** 3 / 96) * Math.sin(6 * mu) + (1097 * e1 ** 4 / 512) * Math.sin(8 * mu);
+    const N1 = WA / Math.sqrt(1 - WE2 * Math.sin(ph1) ** 2), T1 = Math.tan(ph1) ** 2, C1 = WEP2 * Math.cos(ph1) ** 2;
+    const R1 = WA * (1 - WE2) / Math.pow(1 - WE2 * Math.sin(ph1) ** 2, 1.5), D = x / (N1 * K0);
+    const lat = ph1 - (N1 * Math.tan(ph1) / R1) * (D * D / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * WEP2) * D ** 4 / 24 + (61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * WEP2 - 3 * C1 * C1) * D ** 6 / 720);
+    const lon = lon0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6 + (5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * WEP2 + 24 * T1 * T1) * D ** 5 / 120) / Math.cos(ph1);
+    return { lat: lat / D2R, lon: lon / D2R };
+  }
+  function parseCh(s) { s = String(s == null ? '' : s).trim(); const m = s.match(/^(\d+)\+(\d+(?:\.\d+)?)$/); return m ? +m[1] * 1000 + +m[2] : (s === '' ? NaN : parseFloat(s)); }
+  function fmtCh(v, d = 3) { if (!ok(v)) return '–'; const k = Math.floor(v / 1000 + 1e-9), r = v - k * 1000; return k + '+' + r.toFixed(d).padStart(d ? 4 + d : 3, '0'); }
+  function hcurve(o) { // o: delta (deg), R, PI (chainage), interval, optional piE, piN, azBack, dir (+1 right, -1 left)
+    const D = o.delta * D2R, R = o.R, T = R * Math.tan(D / 2), L = R * D, E = R * (1 / Math.cos(D / 2) - 1), M = R * (1 - Math.cos(D / 2)), LC = 2 * R * Math.sin(D / 2);
+    const PC = o.PI - T, PT = PC + L, c = o.interval; const list = [PC];
+    for (let s = Math.ceil((PC + 1e-9) / c) * c; s < PT - 1e-9; s += c) list.push(s); list.push(PT);
+    const geo = ok(o.piE) && ok(o.piN) && ok(o.azBack); const dir = o.dir < 0 ? -1 : 1;
+    let pc = null, center = null, pt = null;
+    if (geo) { pc = forward({ E: o.piE, N: o.piN }, norm360(o.azBack + 180), T); center = forward(pc, norm360(o.azBack + dir * 90), R); pt = forward({ E: o.piE, N: o.piN }, norm360(o.azBack + dir * o.delta), T); }
+    let prev = PC; const st = list.map(ch => {
+      const arc = ch - PC, defl = arc / (2 * R) / D2R, chord = 2 * R * Math.sin(arc / (2 * R));
+      const r = { ch, arc, defl, chord, sub: 2 * R * Math.sin((ch - prev) / (2 * R)) }; prev = ch;
+      if (geo) { const p = arc < 1e-12 ? pc : forward(pc, norm360(o.azBack + dir * defl), chord); r.E = p.E; r.N = p.N; r.azT = norm360(o.azBack + dir * 2 * defl); }
+      return r;
+    });
+    return { T, L, E, M, LC, PC, PT, st, geo, pc, pt, center, dir, azBack: o.azBack, azAhead: geo ? norm360(o.azBack + dir * o.delta) : NaN, pi: geo ? { E: o.piE, N: o.piN } : null };
+  }
+  function vcurve(o) {
+    const g1 = o.g1 / 100, g2 = o.g2 / 100, L = o.L, A = g2 - g1, BVC = o.PVI - L / 2, EBVC = o.elev - g1 * L / 2, c = o.interval; const list = [BVC];
+    for (let s = Math.ceil((BVC + 1e-9) / c) * c; s < BVC + L - 1e-9; s += c) list.push(s); list.push(BVC + L);
+    const st = list.map(ch => { const x = ch - BVC; return { ch, x, tan: EBVC + g1 * x, el: EBVC + g1 * x + A * x * x / (2 * L) }; });
+    const xt = A !== 0 ? -g1 * L / A : null; const turn = xt != null && xt > 0 && xt < L ? { ch: BVC + xt, el: EBVC + g1 * xt + A * xt * xt / (2 * L) } : null;
+    return { BVC, EVC: BVC + L, EBVC, EEVC: EBVC + g1 * L + A * L / 2, A: A * 100, K: A !== 0 ? L / Math.abs(A * 100) : null, st, turn, e: A * L / 8 };
+  }
+
   /* ---------- COGO ---------- */
   function forward(p, azd, d) { const a = azd / RHO; return { E: p.E + d * Math.sin(a), N: p.N + d * Math.cos(a) }; }
   function intersectBB(p1, az1, p2, az2) {
@@ -916,7 +967,7 @@ details.hlp[open] summary{border-bottom:1px solid var(--rule2)}
     return concat(chunks);
   }
 
-  G.SV = { RHO, SEC, num, ok, norm360, norm180, azDeg, az, dist, parseAngle, fmtDMS, fmtBearing, computeTraverse, lsq2d, levelBook, levelNet, levelGrid, gridBalance, forward, intersectBB, intersectDD, intersectBD, stationOffset, fromStaOff, polyArea, thaiArea, stakeout, gridPoints, buildTIN, zAt, contours, cutFillTri, volumeLevel, volumeGrid, pointInPoly, parseCSV, DXF, zipStore, crc32, pdfFromJpegs, chi2q };
+  G.SV = { RHO, SEC, num, ok, norm360, norm180, azDeg, az, dist, parseAngle, fmtDMS, fmtBearing, computeTraverse, lsq2d, levelBook, levelNet, levelGrid, gridBalance, ll2utm, utm2ll, parseCh, fmtCh, hcurve, vcurve, forward, intersectBB, intersectDD, intersectBD, stationOffset, fromStaOff, polyArea, thaiArea, stakeout, gridPoints, buildTIN, zAt, contours, cutFillTri, volumeLevel, volumeGrid, pointInPoly, parseCSV, DXF, zipStore, crc32, pdfFromJpegs, chi2q };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /* ===== App: state, helpers ===== */
@@ -1438,6 +1489,7 @@ details.hlp[open] summary{border-bottom:1px solid var(--rule2)}
     }
     if (((t === 'lev' && S().lev.sub === 'grid') || (t === 'exp' && want('lgrid')) || t === 'lgrid') && R.lgrid && R.lgrid.pts) { sc.lg = R.lgrid; sc.bbox.push(...R.lgrid.pts); if (t !== 'exp') sc.pts = sc.pts.filter(isCtrl); }
     if (t === 'vol' && R.vol && !R.vol.errs.length) { sc.vol = R.vol; const b = R.vol.tinE.bbox; sc.bbox.push({ E: b[0], N: b[1] }, { E: b[2], N: b[3] }); if (R.vol.bnd) sc.polys.push({ pts: R.vol.bnd, color: 'ink' }); sc.pts = sc.pts.filter(isCtrl); }
+    if (t === 'road' && A.roadScene) A.roadScene(sc);
     if (!sc.bbox.length) sc.bbox = sc.pts.slice();
     if (t === 'exp' && lay && !lay.pts) sc.pts = [];
     return sc;
@@ -2022,6 +2074,13 @@ details.hlp[open] summary{border-bottom:1px solid var(--rule2)}
       'จำกัดขอบเขตพื้นที่ได้ด้วยชื่อจุดตามลำดับรอบรูป',
       'ปุ่ม <b>หาระดับสมดุลขุด–ถม</b> หาระดับที่ดินขุดพอดีกับดินถม',
       'ถ้าเก็บระดับเป็นตารางสม่ำเสมอ ใช้เมนูระดับ › ตารางระดับแปลงที่ดิน จะสะดวกกว่า'])}`),
+    S('road', 'แปลงพิกัด UTM และโค้งถนน', `${ul([
+      '<b>Lat/Long → UTM</b> — บรรทัดละจุด <code>ชื่อ Lat Long</code> ใช้องศาทศนิยมหรือ องศา-ลิปดา-ฟิลิปดา (เช่น 13-49-11.6) เลือกโซน 47 หรือ 48 แล้วเพิ่มผลลงฐานข้อมูลจุดได้',
+      '<b>UTM → Lat/Long</b> — บรรทัดละจุด <code>ชื่อ E N</code> หรือกดดึงจุดทั้งหมดจากฐานข้อมูล',
+      'ใช้ระบบ WGS84 เท่านั้น ไม่รองรับพื้นหลักฐาน Indian 1975',
+      '<b>โค้งราบ</b> — ใส่มุมเบี่ยง Δ รัศมี R และระยะทาง PI (รูปแบบ 1+234.567) ได้ T, L, E, M, LC, PC, PT และตารางมุมเบี่ยงสะสมจาก PC',
+      'ถ้าใส่พิกัด PI อะซิมัทแนวขาเข้า และทิศเลี้ยว ระบบคำนวณพิกัดทุกหมุดบนโค้ง บันทึกลงฐานข้อมูล (รหัส CURVE) แล้วไปคำนวณวางผังต่อในเมนูวางผังได้',
+      '<b>โค้งดิ่ง</b> — ใส่ g1, g2 (%), ความยาว L, ระยะทางและระดับ PVI ได้ BVC, EVC, K, จุดสูงสุด/ต่ำสุด และระดับทุกหมุด'])}`),
     S('exp', 'ส่งออก DXF / PDF / CSV', `${ul([
       '<b>DXF</b> — เลือกชั้นข้อมูลที่ต้องการ ได้ไฟล์ DXF R12 เปิดใน AutoCAD, Civil 3D, ZWCAD หรือ BricsCAD ได้ (บน claude.ai ไฟล์จะอยู่ใน ZIP)',
       '<b>PDF</b> — รายงานวงรอบ, งานระดับ, ตารางระดับแปลงที่ดิน, ใบงานวางผัง, ปริมาตรดิน, รายการพิกัด และแบบแปลน',
@@ -2050,8 +2109,8 @@ details.hlp[open] summary{border-bottom:1px solid var(--rule2)}
         <p class="hint" style="margin-top:18px">สำรวจและวางผัง Pro · เวอร์ชัน ${A.VERSION}</p>`;
     }
   };
-  A.VERSION = '1.2.0';
-  const MAP = { pts: 'pts', trav: 'trav', lev: 'lev', cogo: 'cogo', stake: 'stake', tin: 'tin', vol: 'vol', exp: 'exp' };
+  A.VERSION = '1.3.0';
+  const MAP = { pts: 'pts', trav: 'trav', lev: 'lev', cogo: 'cogo', stake: 'stake', tin: 'tin', vol: 'vol', road: 'road', exp: 'exp' };
   A.ACT2 = A.ACT2 || {};
   Object.assign(A.ACT2, {
     help(el) {
@@ -2076,13 +2135,119 @@ details.hlp[open] summary{border-bottom:1px solid var(--rule2)}
   })();
 })();
 
+/* ===== UTM conversion + horizontal / vertical curves ===== */
+(function () {
+  'use strict';
+  const A = window.APP; const N = SV.num, OK = SV.ok;
+  const { esc, PM, R, fx, dms, fld, sel, seg, table, stats, errs, toast, persist } = A;
+  const S = () => A.S();
+  const D = () => { const s = S(); if (!s.road) s.road = {}; const d = { sub: 'utm', zone: '47', mode: 'll2utm', data: '', code: 'UTM', delta: '', R: '', PI: '', iv: '20', pi: '', piE: '', piN: '', azB: '', dir: 'R', prefix: 'C', g1: '', g2: '', L: '', PVI: '', el: '', viv: '20' }; for (const k in d) if (s.road[k] === undefined) s.road[k] = d[k]; return s.road; };
+  const rows = t => String(t || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => l.split(/[,\t;]+|\s+/).filter(Boolean));
+
+  A.MOD.road = {
+    title: 'UTM และโค้ง', sub: 'แปลงพิกัด · โค้งราบ/ดิ่ง',
+    view() {
+      const d = D();
+      let h = `<h1>แปลงพิกัดและโค้งถนน</h1><p class="lede">แปลงพิกัด UTM ↔ ละติจูด/ลองจิจูด (WGS84) และคำนวณโค้งราบ (วงกลม) โค้งดิ่ง (พาราโบลา) สำหรับวางแนวถนนและรางระบายน้ำ</p>
+      <div class="row">${seg('road.sub', [['utm', 'แปลงพิกัด UTM'], ['hc', 'โค้งราบ'], ['vc', 'โค้งดิ่ง']])}</div>`;
+      if (d.sub === 'utm') {
+        h += `<h2>ข้อมูล</h2><div class="row">${sel('ทิศทาง', 'road.mode', [['ll2utm', 'Lat/Long → UTM'], ['utm2ll', 'UTM → Lat/Long']], { w: 'w3', rr: 1 })}${fld('โซน UTM', 'road.zone', { num: 1, w: 'w1' })}</div>
+        <p class="hint">ประเทศไทยใช้โซน 47 (ตะวันตกของลองจิจูด 102°) และ 48 (ตะวันออก) บรรทัดละจุด: ${d.mode === 'll2utm' ? '<b>ชื่อ Lat Long</b> เป็นองศาทศนิยม เช่น <code>P1 13.7563 100.5018</code> หรือ องศา-ลิปดา-ฟิลิปดา เช่น <code>P2 13-49-11.6 100-03-43.6</code>' : '<b>ชื่อ E N</b> เช่น <code>P1 662366.598 1521280.655</code>'}</p>
+        <textarea data-k="road.data" spellcheck="false" placeholder="${d.mode === 'll2utm' ? 'P1 13.7563 100.5018' : 'P1 662366.598 1521280.655'}">${esc(d.data)}</textarea>
+        <div class="actions"><button class="btn pri" data-act="utmcalc">แปลงพิกัด</button>${d.mode === 'utm2ll' ? '<button class="btn" data-act="utmfromdb">ดึงจุดทั้งหมดจากฐานข้อมูล</button>' : ''}</div><div id="utmOut">${utmOut()}</div>`;
+      } else if (d.sub === 'hc') {
+        h += `<h2>องค์ประกอบโค้ง</h2><div class="row">${fld('มุมเบี่ยง Δ', 'road.delta', { w: 'w2', ph: '40.0000' })}${fld('รัศมี R (ม.)', 'road.R', { num: 1, w: 'w2' })}${fld('ระยะทาง PI', 'road.PI', { w: 'w2', ph: '1+234.567' })}${fld('ระยะหมุดทุก (ม.)', 'road.iv', { num: 1, w: 'w2' })}</div>
+        <h2>พิกัดหมุดบนโค้ง (ไม่บังคับ)</h2><p class="hint">ใส่ตำแหน่งจุด PI และอะซิมัทของแนวเส้นตรงขาเข้า เพื่อคำนวณพิกัดทุกหมุดบนโค้ง แล้วบันทึกลงฐานข้อมูลไปวางผังต่อได้</p>
+        <div class="row">${fld('จุด PI (ชื่อจุด)', 'road.pi', { list: 1, w: 'w2' })}${fld('หรือ E', 'road.piE', { num: 1, w: 'w2' })}${fld('N', 'road.piN', { num: 1, w: 'w2' })}${fld('อะซิมัทแนวขาเข้า', 'road.azB', { w: 'w2' })}${sel('เลี้ยว', 'road.dir', [['R', 'ขวา'], ['L', 'ซ้าย']], { w: 'w1' })}${fld('คำนำหน้าชื่อหมุด', 'road.prefix', { w: 'w2' })}</div>
+        <div class="actions"><button class="btn pri" data-act="hccalc">คำนวณโค้งราบ</button><button class="btn" data-act="hcsave"${R.hc && !R.hc.err && R.hc.geo ? '' : ' disabled'}>บันทึกหมุดโค้งลงฐานข้อมูล</button></div><div id="hcOut">${hcOut()}</div>`;
+      } else {
+        h += `<h2>องค์ประกอบโค้งดิ่ง</h2><div class="row">${fld('ความลาดขาเข้า g1 (%)', 'road.g1', { num: 1, w: 'w3' })}${fld('ความลาดขาออก g2 (%)', 'road.g2', { num: 1, w: 'w3' })}${fld('ความยาวโค้ง L (ม.)', 'road.L', { num: 1, w: 'w3' })}</div>
+        <div class="row" style="margin-top:8px">${fld('ระยะทาง PVI', 'road.PVI', { w: 'w2', ph: '1+000' })}${fld('ระดับ PVI (ม.)', 'road.el', { num: 1, w: 'w2' })}${fld('ระยะหมุดทุก (ม.)', 'road.viv', { num: 1, w: 'w2' })}</div>
+        <div class="actions"><button class="btn pri" data-act="vccalc">คำนวณโค้งดิ่ง</button></div><div id="vcOut">${vcOut()}</div>`;
+      }
+      return h;
+    }
+  };
+
+  function utmCalc() {
+    const d = D(); const z = Math.round(N(d.zone)); const e = []; const out = [];
+    if (!(z >= 1 && z <= 60)) e.push('โซนต้องอยู่ระหว่าง 1–60');
+    const rw = rows(d.data); if (!rw.length) e.push('ยังไม่มีข้อมูล');
+    if (!e.length) rw.forEach((r, i) => {
+      if (r.length < 3) { e.push(`บรรทัด ${i + 1}: ต้องมี ชื่อ และค่า 2 ค่า`); return; }
+      if (d.mode === 'll2utm') { const la = SV.parseAngle(r[1], 'deg'), lo = SV.parseAngle(r[2], 'deg'); if (!OK(la) || !OK(lo) || Math.abs(la) > 84 || Math.abs(lo) > 180) { e.push(`บรรทัด ${i + 1}: อ่านค่า Lat/Long ไม่ได้`); return; } const u = SV.ll2utm(la, lo, z); out.push({ name: r[0], lat: la, lon: lo, E: u.E, N: u.N, south: la < 0 }); }
+      else { const E = N(r[1]), No = N(r[2]); if (!OK(E) || !OK(No)) { e.push(`บรรทัด ${i + 1}: อ่านค่า E N ไม่ได้`); return; } const g = SV.utm2ll(E, No, z, false); out.push({ name: r[0], lat: g.lat, lon: g.lon, E, N: No }); }
+    });
+    R.utm = { errs: e, out, zone: z, mode: d.mode };
+  }
+  function utmOut() {
+    const r = R.utm; if (!r) return `<div class="empty">ใส่ข้อมูลแล้วกด “แปลงพิกัด”</div>`;
+    if (r.errs.length) return errs(r.errs);
+    const zoneMiss = r.mode === 'll2utm' && r.out.some(p => Math.floor((p.lon + 180) / 6) + 1 !== r.zone);
+    let h = table([{ h: 'จุด' }, { h: 'Lat', n: 1 }, { h: 'Long', n: 1 }, { h: 'Lat (° ′ ″)' }, { h: 'Long (° ′ ″)' }, { h: 'E (ม.)', n: 1 }, { h: 'N (ม.)', n: 1 }],
+      r.out.map(p => [esc(p.name), p.lat.toFixed(8), p.lon.toFixed(8), SV.fmtDMS(p.lat, 3), SV.fmtDMS(p.lon, 3), fx(p.E), fx(p.N)]), { max: 420 });
+    if (zoneMiss) h += `<p class="note">บางจุดอยู่นอกโซน ${r.zone} — ค่ายังคำนวณได้ แต่ความคลาดเคลื่อนจากการฉายแผนที่จะสูงขึ้น</p>`;
+    h += `<p class="hint">ระบบพิกัด WGS84 / UTM โซน ${r.zone}N (EPSG:${32600 + r.zone}) ไม่รองรับพื้นหลักฐาน Indian 1975</p>`;
+    if (r.mode === 'll2utm') h += `<div class="row">${fld('รหัสจุดเมื่อบันทึก', 'road.code', { w: 'w2' })}<button class="btn" data-act="utmsave" style="margin-bottom:2px">เพิ่มพิกัด UTM ลงฐานข้อมูลจุด</button></div>`;
+    return h;
+  }
+  function hcCalc() {
+    const d = D(); const e = [];
+    const delta = SV.parseAngle(d.delta, S().set.angFmt), Rr = N(d.R), PI = SV.parseCh(d.PI), iv = N(d.iv);
+    if (!(delta > 0 && delta < 180)) e.push('มุมเบี่ยง Δ ต้องอยู่ระหว่าง 0°–180°'); if (!(Rr > 0)) e.push('รัศมีต้องมากกว่า 0'); if (!OK(PI)) e.push('ใส่ระยะทาง PI เช่น 1+234.567'); if (!(iv > 0)) e.push('ระยะหมุดต้องมากกว่า 0');
+    if (e.length) { R.hc = { err: e }; return; }
+    let piE = N(d.piE), piN = N(d.piN); const p = PM()[String(d.pi || '').trim()]; if (p) { piE = p.E; piN = p.N; }
+    const azB = SV.parseAngle(d.azB, S().set.angFmt);
+    R.hc = SV.hcurve({ delta, R: Rr, PI, interval: iv, piE, piN, azBack: azB, dir: d.dir === 'L' ? -1 : 1 }); R.hc.delta = delta; R.fit = true;
+  }
+  function hcOut() {
+    const r = R.hc; if (!r) return `<div class="empty">ใส่ Δ, R และระยะ PI แล้วกด “คำนวณโค้งราบ”</div>`;
+    if (r.err) return errs(r.err);
+    let h = stats([['ระยะสัมผัส T', fx(r.T) + ' <small>ม.</small>'], ['ความยาวโค้ง L', fx(r.L) + ' <small>ม.</small>'], ['ระยะภายนอก E', fx(r.E) + ' <small>ม.</small>'], ['ระยะกลางโค้ง M', fx(r.M) + ' <small>ม.</small>'], ['คอร์ดยาว LC', fx(r.LC) + ' <small>ม.</small>'], ['PC / PT', `${SV.fmtCh(r.PC)} / ${SV.fmtCh(r.PT)}`]]);
+    h += `<h3>ตารางวางโค้งด้วยมุมเบี่ยงจาก PC</h3><p class="hint">ตั้งกล้องที่ PC เล็ง PI ตั้งมุม 0°00′00″ แล้วหมุนกล้อง${r.dir < 0 ? 'ทวนเข็ม (เลี้ยวซ้าย)' : 'ตามเข็ม (เลี้ยวขวา)'}ตามมุมเบี่ยงสะสม วัดคอร์ดจาก PC หรือคอร์ดย่อยต่อจากหมุดก่อนหน้า</p>`;
+    h += table([{ h: 'หมุด' }, { h: 'ความยาวโค้ง', n: 1 }, { h: 'มุมเบี่ยงสะสม' }, { h: 'คอร์ดจาก PC', n: 1 }, { h: 'คอร์ดย่อย', n: 1 }].concat(r.geo ? [{ h: 'E', n: 1 }, { h: 'N', n: 1 }] : []),
+      r.st.map((s, i) => [SV.fmtCh(s.ch) + (i === 0 ? ' (PC)' : i === r.st.length - 1 ? ' (PT)' : ''), fx(s.arc), dms(s.defl), fx(s.chord), i ? fx(s.sub) : '–'].concat(r.geo ? [fx(s.E), fx(s.N)] : [])), { max: 460 });
+    if (r.geo) h += `<p class="hint">อะซิมัทแนวขาออก ${dms(r.azAhead)} · ศูนย์กลางโค้ง E ${fx(r.center.E)} N ${fx(r.center.N)}</p>`;
+    return h;
+  }
+  function vcCalc() {
+    const d = D(); const e = []; const g1 = N(d.g1), g2 = N(d.g2), L = N(d.L), P = SV.parseCh(d.PVI), el = N(d.el), iv = N(d.viv);
+    if (!OK(g1) || !OK(g2)) e.push('ใส่ความลาด g1 และ g2 (%)'); if (!(L > 0)) e.push('ความยาวโค้งต้องมากกว่า 0'); if (!OK(P)) e.push('ใส่ระยะทาง PVI'); if (!OK(el)) e.push('ใส่ระดับ PVI'); if (!(iv > 0)) e.push('ระยะหมุดต้องมากกว่า 0');
+    R.vc = e.length ? { err: e } : SV.vcurve({ g1, g2, L, PVI: P, elev: el, interval: iv });
+  }
+  function vcOut() {
+    const r = R.vc; if (!r) return `<div class="empty">ใส่ g1, g2, L, PVI แล้วกด “คำนวณโค้งดิ่ง”</div>`;
+    if (r.err) return errs(r.err);
+    let h = stats([['BVC', `${SV.fmtCh(r.BVC)} <small>ระดับ ${fx(r.EBVC)}</small>`], ['EVC', `${SV.fmtCh(r.EVC)} <small>ระดับ ${fx(r.EEVC)}</small>`], ['A = g2 − g1', r.A.toFixed(3) + ' <small>%</small>'], ['K = L/|A|', r.K ? r.K.toFixed(2) : '–'], ['ระยะตั้งฉากที่ PVI', fx(Math.abs(r.e)) + ' <small>ม.</small>'], [r.A < 0 ? 'จุดสูงสุด' : 'จุดต่ำสุด', r.turn ? `${SV.fmtCh(r.turn.ch)} <small>ระดับ ${fx(r.turn.el)}</small>` : 'ไม่อยู่ในช่วงโค้ง']]);
+    h += table([{ h: 'หมุด' }, { h: 'x จาก BVC', n: 1 }, { h: 'ระดับแนวเส้นสัมผัส', n: 1 }, { h: 'ระดับบนโค้ง', n: 1 }], r.st.map(s => [SV.fmtCh(s.ch), fx(s.x), fx(s.tan), `<b>${fx(s.el)}</b>`]), { max: 460 });
+    return h;
+  }
+  function rr() { const p = document.getElementById('panel'); const sy = p.scrollTop; p.innerHTML = A.MOD.road.view(); p.scrollTop = sy; const h1 = p.querySelector('h1'); if (h1) h1.insertAdjacentHTML('beforeend', ' <button class="helpln" data-act="help" data-v="road">คู่มือ</button>'); A.drawPlan(); }
+  Object.assign(A.ACT2, {
+    utmcalc() { utmCalc(); rr(); },
+    utmfromdb() { const P = Object.values(PM()); if (!P.length) { toast('ฐานข้อมูลจุดว่าง'); return; } D().data = P.map(p => `${p.name} ${p.E.toFixed(3)} ${p.N.toFixed(3)}`).join('\n'); persist(); rr(); },
+    utmsave() { const r = R.utm; if (!r || r.errs.length) return; r.out.forEach(p => A.upsert(p.name, p.E, p.N, undefined, D().code || 'UTM')); persist(); toast(`เพิ่ม ${r.out.length} จุดลงฐานข้อมูลแล้ว`); },
+    hccalc() { hcCalc(); rr(); },
+    hcsave() { const r = R.hc; if (!r || !r.geo) return; const pre = D().prefix || ''; r.st.forEach(s => A.upsert(pre + SV.fmtCh(s.ch), s.E, s.N, undefined, 'CURVE')); persist(); toast(`บันทึก ${r.st.length} หมุดลงฐานข้อมูล (รหัส CURVE) ใช้รหัสนี้ในเมนูวางผังได้`, 5000); },
+    vccalc() { vcCalc(); rr(); }
+  });
+  A.roadScene = function (sc) {
+    const r = R.hc; if (S().road && S().road.sub === 'hc' && r && !r.err && r.geo) {
+      sc.dlines.push({ a: r.pc, b: r.pi, color: 'ctrl' }, { a: r.pi, b: r.pt, color: 'ctrl' });
+      for (let i = 1; i < r.st.length; i++) sc.lines.push({ a: r.st[i - 1], b: r.st[i], color: 'flag', w: 2 });
+      sc.travLab = r.st.map(s => ({ name: SV.fmtCh(s.ch, 0), E: s.E, N: s.N }));
+      sc.bbox.push(r.pc, r.pi, r.pt, ...r.st);
+    }
+  };
+})();
+
 (function () {
   'use strict';
   const A = window.APP; const N = SV.num, OK = SV.ok;
   const { $, esc, PM, R, MOD, toast, getP, setP, persist } = A;
   const S = () => A.S();
   const panel = $('#panel');
-  const ORDER = ['pts', 'trav', 'lev', 'cogo', 'stake', 'tin', 'vol', 'exp', 'help'];
+  const ORDER = ['pts', 'trav', 'lev', 'cogo', 'stake', 'tin', 'vol', 'road', 'exp', 'help'];
 
   function nav() { $('#rail').innerHTML = ORDER.map(k => `<button data-tab="${k}"${A.tab() === k ? ' aria-current="page"' : ''}>${MOD[k].title}<small>${MOD[k].sub}</small></button>`).join(''); }
   function render(keepScroll) {
